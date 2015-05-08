@@ -32,11 +32,11 @@ The request arrived at %s<br>
 </body>
 </html>""" % (
     os.environ.get('SERVER_NAME', default),  # Server Hostname or IP
-    'aaaa',  # server port
-    'bbbb',  # client hostname
-    'cccc',  # client IP
-    'dddd',  # this script name
-    'eeee',  # time
+    os.environ.get('SERVER_PORT', default),  # server port
+    os.environ.get('REMOTE_HOST', default),  # client hostname
+    os.environ.get('REMOTE_ADDR', default),  # client IP
+    os.environ.get('SCRIPT_NAME', default),  # this script name
+    datetime.datetime.now(),  # time
 )
 
 print body,
