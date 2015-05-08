@@ -1,83 +1,121 @@
 import mimetypes
 import socket
 import unittest
-
+import sys
 
 CRLF = '\r\n'
 KNOWN_TYPES = set(mimetypes.types_map.values())
 
+def call_request_handler(request):
+    """Helper for unit tests for the handle_request method
 
-class ResponseOkTestCase(unittest.TestCase):
-    """unit tests for the response_ok method in our server
+    Because this is a unit test helper, it does not require the server
+    to be running"""
+    from http_server import handle_request
+    return handle_request(request, sys.stderr)
 
-    Becase this is a unit test case, it does not require the server to be
-    running.
-    """
+def get_response_code(response):
+    return response.split(CRLF)[0].split(' ', 1)[1].strip()
 
-    def call_function_under_test(self):
-        """call the `response_ok` function from our http_server module"""
-        from http_server import response_ok
-        return response_ok()
+def get_protocol(response):
+    return response.split(CRLF)[0].split(' ', 1)[0].strip()
+
+def parse_headers(response):
+    headers = {}
+    raw_headers = response.split(CRLF+CRLF, 1)[0].split(CRLF)[1:]
+    for raw_header in raw_headers:
+        try:
+            name, value = raw_header.split(':')
+            actual_name = name.strip().lower()
+            headers[actual_name] = value.strip()
+        except ValueError:
+            print "Bad header: [" + raw_header + "] in headers [" + str(raw_headers) + "] in response [" + response + "]"
+    return headers
+
+def has_header(response, header_name):
+    return header_name in parse_headers(response)
+
+def get_header_value(response, header_name):
+    return parse_headers(response)[header_name]
+
+def get_contents(response):
+    return response.split(CRLF+CRLF, 1)[1]
+
+class SimpleSuccessfulRequestsTestCase(unittest.TestCase):
+    """unit tests for simple successful requests
+
+    the server does not need to be running"""
 
     def test_response_code(self):
-        ok = self.call_function_under_test()
-        expected = "200 OK"
-        actual = ok.split(CRLF)[0].split(' ', 1)[1].strip()
-        self.assertEqual(expected, actual)
+        response = call_request_handler("GET / HTTP/1.1")
+        self.assertEqual("200 OK", get_response_code(response))
 
-    def test_response_method(self):
-        ok = self.call_function_under_test()
-        expected = 'HTTP/1.1'
-        actual = ok.split(CRLF)[0].split(' ', 1)[0].strip()
-        self.assertEqual(expected, actual)
+    def test_response_protocol_is_http11_for_http10(self):
+        response = call_request_handler("GET / HTTP/1.0")
+        self.assertEqual("HTTP/1.1", get_protocol(response))
+
+    def test_response_protocol_is_http11_for_http11(self):
+        response = call_request_handler("GET / HTTP/1.1")
+        self.assertEqual("HTTP/1.1", get_protocol(response))
 
     def test_response_has_content_type_header(self):
-        ok = self.call_function_under_test()
-        headers = ok.split(CRLF+CRLF, 1)[0].split(CRLF)[1:]
-        expected_name = 'content-type'
-        has_header = False
-        for header in headers:
-            name, value = header.split(':')
-            actual_name = name.strip().lower()
-            if actual_name == expected_name:
-                has_header = True
-                break
-        self.assertTrue(has_header)
+        response = call_request_handler("GET / HTTP/1.1")
+        self.assertTrue(has_header(response, 'content-type'))
 
     def test_response_has_legitimate_content_type(self):
-        ok = self.call_function_under_test()
-        headers = ok.split(CRLF+CRLF, 1)[0].split(CRLF)[1:]
-        expected_name = 'content-type'
-        for header in headers:
-            name, value = header.split(':')
-            actual_name = name.strip().lower()
-            if actual_name == expected_name:
-                self.assertTrue(value.strip() in KNOWN_TYPES)
-                return
-        self.fail('no content type header found')
+        response = call_request_handler("GET / HTTP/1.1")
+        self.assertTrue(get_header_value(response, 'content-type') in KNOWN_TYPES)
 
-
-class ResponseMethodNotAllowedTestCase(unittest.TestCase):
-    """unit tests for the response_method_not_allowed function"""
-
-    def call_function_under_test(self):
-        """call the `response_method_not_allowed` function"""
-        from http_server import response_method_not_allowed
-        return response_method_not_allowed()
+class OnlyGetIsImplementedTestCase(unittest.TestCase):
+    """unit tests for responding '501 Not Implemented' to all verbs other than GET"""
 
     def test_response_code(self):
-        resp = self.call_function_under_test()
-        expected = "405 Method Not Allowed"
-        actual = resp.split(CRLF)[0].split(' ', 1)[1].strip()
-        self.assertEqual(expected, actual)
+        response = call_request_handler("POST / HTTP/1.1")
+        self.assertEqual("501 Not Implemented", get_response_code(response))
 
     def test_response_method(self):
-        resp = self.call_function_under_test()
-        expected = 'HTTP/1.1'
-        actual = resp.split(CRLF)[0].split(' ', 1)[0].strip()
-        self.assertEqual(expected, actual)
+        response = call_request_handler("DELETE / HTTP/1.1")
+        self.assertEqual('HTTP/1.1', get_protocol(response))
 
+class RequestUriIsHandledTestCase(unittest.TestCase):
+    """unit tests for responding differently based on the request URI"""
 
+    def test_returns_text_file_under_webserver_root(self):
+        response = call_request_handler("GET /test_contents/test_text_file.txt HTTP/1.1")
+        self.assertEqual("text/plain", get_header_value(response, 'content-type'))
+        text_file = open("webserver_root/test_contents/test_text_file.txt", "r")
+        text_contents = text_file.read()
+        self.assertEqual(text_contents, get_contents(response))
+
+    def test_does_not_return_text_file_not_under_webserver_root(self):
+        response = call_request_handler("GET /never_return.txt HTTP/1.1")
+        self.assertEqual("404 Not Found", get_response_code(response))
+
+    def test_does_not_return_text_file_from_parent_directory(self):
+        response = call_request_handler("GET /../never_return.txt HTTP/1.1")
+        self.assertEqual("404 Not Found", get_response_code(response))
+
+    def test_returns_html_file_as_html(self):
+        response = call_request_handler("GET /test_contents/test.html HTTP/1.1")
+        self.assertEqual("text/html", get_header_value(response, 'content-type'))
+        html_file = open("webserver_root/test_contents/test.html", "r")
+        html_contents = html_file.read()
+        self.assertEqual(html_contents, get_contents(response))
+
+    def test_returns_png_as_png(self):
+        response = call_request_handler("GET /test_contents/android.png HTTP/1.1")
+        self.assertEqual("image/png", get_header_value(response, 'content-type'))
+        image_file = open("webserver_root/test_contents/android.png", "rb")
+        image_contents = image_file.read()
+        self.assertEqual(image_contents, get_contents(response))
+		
+    def test_returns_jpeg_as_jpeg(self):
+        response = call_request_handler("GET /test_contents/boomdeyada.jpg HTTP/1.1")
+        self.assertEqual("image/jpeg", get_header_value(response, 'content-type'))
+        image_file = open("webserver_root/test_contents/boomdeyada.jpg", "rb")
+        image_contents = image_file.read()
+        self.assertEqual(image_contents, get_contents(response))
+		
 class ParseRequestTestCase(unittest.TestCase):
     """unit tests for the parse_request method"""
 
@@ -136,7 +174,7 @@ class HTTPServerFunctionalTestCase(unittest.TestCase):
 
     def test_post_request(self):
         message = CRLF.join(['POST / HTTP/1.1', 'Host: example.com', ''])
-        expected = '405 Method Not Allowed'
+        expected = '501 Not Implemented'
         actual = self.send_message(message)
         self.assertTrue(
             expected in actual, '"{0}" not in "{1}"'.format(expected, actual)
